@@ -1,0 +1,96 @@
+#!groovy
+@Library('jenkins-pipeline-shared') _
+
+pipeline {
+
+    agent none
+
+    environment {
+        linuxDockerRegistry = "quay.io/ayfie"
+        windowsDockerRegistry = "ayfiehub"
+        NUGET_API_KEY = credentials('ayfie_jenkins_nexus_nugetapikey')
+        NEXUS_CREDENTIALS = credentials('nexus')
+        NUGET_CERT_REVOCATION_MODE = 'offline'
+        BUILDCONFIG = 'Debug'
+    }
+    options {
+        gitLabConnection('git.ayfie.cloud')
+        timeout(time: 30, unit: 'MINUTES')
+        timestamps()
+        disableConcurrentBuilds()
+        quietPeriod(300)
+    }
+
+    stages {
+        stage('Parallel Stage') {
+
+            parallel {
+
+                stage("Windows Node") {
+
+                    agent { label "windows" }
+
+                    stages {
+                        stage("Windows: Checkout") {
+                            steps {
+                                checkout scm
+                                bat 'git status'
+                                bat 'git branch -vva'
+                            }
+                        }
+
+                        stage("Windows: Clean packages folder") {
+                            steps {
+                                dir('packages') {
+                                    deleteDir()
+                                }
+                            }
+                        }
+
+                        stage("Windows: Docker Image Promote to Release") {
+                            steps {
+                                powershell(".\\build.ps1 PromoteImageToRelease")
+                            }
+                        }
+
+                        stage("Windows: Build and Publish Release Installation Bundle") {
+                            steps {
+                                powershell(".\\build.ps1 BuildInstallationReleaseBundle PublishInstallationReleaseBundle")
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            echo "Cleanup of Windows Node step"
+                        }
+                    }
+                }
+            }
+        }
+    }
+    post {
+        always {
+            // Send notification
+            sendNotification currentBuild.result
+        }
+        failure {
+            script{
+                if (env.BRANCH_NAME == 'master') {
+                    slackSend channel: '#jenkins-saga-pipeline',
+                        color: 'danger',
+                        teamDomain: 'ayfie',
+                        tokenCredentialId: '4ef80452-7d7c-494c-a5fe-27ae59fcec80',
+                        username: 'Jenkins Notifier',
+                        message: "*${currentBuild.currentResult}:* @here Job ${env.JOB_NAME} build ${env.BUILD_NUMBER} failed! \n More info at: ${env.BUILD_URL}"
+
+                    emailext body: "*${currentBuild.currentResult}:* Job ${env.JOB_NAME} build ${env.BUILD_NUMBER} failed! \n More info at: ${env.BUILD_URL}",
+                         recipientProviders: [[$class: 'DevelopersRecipientProvider'],
+                                            [$class: 'RequesterRecipientProvider'],
+                                            [$class: 'CulpritsRecipientProvider'],
+                                            [$class: 'UpstreamComitterRecipientProvider']],
+                         subject: "Build ${env.JOB_NAME} failed!"
+                }
+            }
+        }
+    }
+}
